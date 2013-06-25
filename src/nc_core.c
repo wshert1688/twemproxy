@@ -17,16 +17,16 @@
 
 #include <stdlib.h>
 #include <unistd.h>
+
+#include <sys/epoll.h>
+
 #include <nc_core.h>
+#include <nc_event.h>
 #include <nc_conf.h>
 #include <nc_server.h>
 #include <nc_proxy.h>
 
 static uint32_t ctx_id; /* context generation */
-
-/* function prototype for use in core_ctx_create() */
-static void
-core_core(void *arg, uint32_t events);
 
 static struct context *
 core_ctx_create(struct instance *nci)
@@ -41,10 +41,12 @@ core_ctx_create(struct instance *nci)
     ctx->id = ++ctx_id;
     ctx->cf = NULL;
     ctx->stats = NULL;
-    ctx->evb = NULL;
     array_null(&ctx->pool);
+    ctx->ep = -1;
+    ctx->nevent = EVENT_SIZE_HINT;
     ctx->max_timeout = nci->stats_interval;
     ctx->timeout = ctx->max_timeout;
+    ctx->event = NULL;
 
     /* parse and create configuration */
     ctx->cf = conf_create(nci->conf_filename);
@@ -72,8 +74,8 @@ core_ctx_create(struct instance *nci)
     }
 
     /* initialize event handling for client, proxy and server */
-    ctx->evb = evbase_create(NC_EVENT_SIZE, &core_core);
-    if (ctx->evb == NULL) {
+    status = event_init(ctx, EVENT_SIZE_HINT);
+    if (status != NC_OK) {
         stats_destroy(ctx->stats);
         server_pool_deinit(&ctx->pool);
         conf_destroy(ctx->cf);
@@ -85,7 +87,7 @@ core_ctx_create(struct instance *nci)
     status = server_pool_preconnect(ctx);
     if (status != NC_OK) {
         server_pool_disconnect(ctx);
-        evbase_destroy(ctx->evb);
+        event_deinit(ctx);
         stats_destroy(ctx->stats);
         server_pool_deinit(&ctx->pool);
         conf_destroy(ctx->cf);
@@ -97,7 +99,7 @@ core_ctx_create(struct instance *nci)
     status = proxy_init(ctx);
     if (status != NC_OK) {
         server_pool_disconnect(ctx);
-        evbase_destroy(ctx->evb);
+        event_deinit(ctx);
         stats_destroy(ctx->stats);
         server_pool_deinit(&ctx->pool);
         conf_destroy(ctx->cf);
@@ -116,7 +118,7 @@ core_ctx_destroy(struct context *ctx)
     log_debug(LOG_VVERB, "destroy ctx %p id %"PRIu32"", ctx, ctx->id);
     proxy_deinit(ctx);
     server_pool_disconnect(ctx);
-    evbase_destroy(ctx->evb);
+    event_deinit(ctx);
     stats_destroy(ctx->stats);
     server_pool_deinit(&ctx->pool);
     conf_destroy(ctx->cf);
@@ -204,9 +206,9 @@ core_close(struct context *ctx, struct conn *conn)
               conn->eof, conn->done, conn->recv_bytes, conn->send_bytes,
               conn->err ? ':' : ' ', conn->err ? strerror(conn->err) : "");
 
-    status = event_del_conn(ctx->evb, conn);
+    status = event_del_conn(ctx->ep, conn);
     if (status < 0) {
-        log_warn("event del conn %c %d failed, ignored: %s",
+        log_warn("event del conn e %d %c %d failed, ignored: %s", ctx->ep,
                  type, conn->sd, strerror(errno));
     }
 
@@ -275,17 +277,9 @@ core_timeout(struct context *ctx)
 }
 
 static void
-core_core(void *arg, uint32_t events)
+core_core(struct context *ctx, struct conn *conn, uint32_t events)
 {
     rstatus_t status;
-    struct conn *conn = (struct conn *) arg;
-    struct context *ctx;
-
-    if ((conn->proxy) || (conn->client)) {
-        ctx = ((struct server_pool *) (conn -> owner)) -> ctx;
-    } else { 
-        ctx = ((struct server_pool *) (((struct server *) (conn -> owner)) -> owner )) -> ctx;
-    }
 
     log_debug(LOG_VVERB, "event %04"PRIX32" on %c %d", events,
               conn->client ? 'c' : (conn->proxy ? 'p' : 's'), conn->sd);
@@ -293,13 +287,13 @@ core_core(void *arg, uint32_t events)
     conn->events = events;
 
     /* error takes precedence over read | write */
-    if (events & EV_ERR) {
+    if (events & EPOLLERR) {
         core_error(ctx, conn);
         return;
     }
 
     /* read takes precedence over write */
-    if (events & EV_READ) {
+    if (events & (EPOLLIN | EPOLLHUP)) {
         status = core_recv(ctx, conn);
         if (status != NC_OK || conn->done || conn->err) {
             core_close(ctx, conn);
@@ -307,7 +301,7 @@ core_core(void *arg, uint32_t events)
         }
     }
 
-    if (events & EV_WRITE) {
+    if (events & EPOLLOUT) {
         status = core_send(ctx, conn);
         if (status != NC_OK || conn->done || conn->err) {
             core_close(ctx, conn);
@@ -319,11 +313,17 @@ core_core(void *arg, uint32_t events)
 rstatus_t
 core_loop(struct context *ctx)
 {
-    int nsd;
+    int i, nsd;
 
-    nsd = event_wait(ctx->evb, ctx->timeout);
+    nsd = event_wait(ctx->ep, ctx->event, ctx->nevent, ctx->timeout);
     if (nsd < 0) {
         return nsd;
+    }
+
+    for (i = 0; i < nsd; i++) {
+        struct epoll_event *ev = &ctx->event[i];
+
+        core_core(ctx, ev->data.ptr, ev->events);
     }
 
     core_timeout(ctx);

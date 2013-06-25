@@ -21,6 +21,7 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/epoll.h>
 #include <netinet/in.h>
 
 #include <nc_core.h>
@@ -776,7 +777,15 @@ stats_loop(void *arg)
     int n;
 
     for (;;) {
-        n = event_wait(st->st_evb, st->interval);
+        n = epoll_wait(st->ep, &st->event, 1, st->interval);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            log_error("epoll wait on e %d with event m %d failed: %s",
+                      st->ep, st->sd, strerror(errno));
+            break;
+        }
 
         /* aggregate stats from shadow (b) -> sum (c) */
         stats_aggregate(st);
@@ -838,6 +847,7 @@ static rstatus_t
 stats_start_aggregator(struct stats *st)
 {
     rstatus_t status;
+    struct epoll_event ev;
 
     if (!stats_enabled) {
         return NC_OK;
@@ -848,28 +858,25 @@ stats_start_aggregator(struct stats *st)
         return status;
     }
 
-    st->st_evb = evbase_create(1, NULL);
-    if (st->st_evb == NULL) {
-        log_error("stats aggregator create failed: %s", strerror(errno));
+    st->ep = epoll_create(10);
+    if (st->ep < 0) {
+        log_error("epoll create failed: %s", strerror(errno));
         return NC_ERROR;
     }
 
-    ASSERT(st->st_evb != NULL);
-    ASSERT(st->sd >= 0);
+    ev.data.fd = st->sd;
+    ev.events = EPOLLIN;
 
-    status = event_add_st(st->st_evb, st->sd);
+    status = epoll_ctl(st->ep, EPOLL_CTL_ADD, st->sd, &ev);
     if (status < 0) {
-        log_error("stats aggregator create failed: %s", strerror(errno));
-        evbase_destroy(st->st_evb);
-        st->st_evb = NULL;
+        log_error("epoll ctl on e %d sd %d failed: %s", st->ep, st->sd,
+                  strerror(errno));
         return NC_ERROR;
     }
 
     status = pthread_create(&st->tid, NULL, stats_loop, st);
     if (status < 0) {
         log_error("stats aggregator create failed: %s", strerror(status));
-        evbase_destroy(st->st_evb);
-        st->st_evb = NULL;
         return NC_ERROR;
     }
 
@@ -884,8 +891,7 @@ stats_stop_aggregator(struct stats *st)
     }
 
     close(st->sd);
-    evbase_destroy(st->st_evb);
-    st->st_evb = NULL;
+    close(st->ep);
 }
 
 struct stats *
@@ -915,7 +921,7 @@ stats_create(uint16_t stats_port, char *stats_ip, int stats_interval,
     array_null(&st->sum);
 
     st->tid = (pthread_t) -1;
-    st->st_evb = NULL;
+    st->ep = -1;
     st->sd = -1;
 
     string_set_text(&st->service_str, "service");

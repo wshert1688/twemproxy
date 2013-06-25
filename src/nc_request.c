@@ -17,19 +17,19 @@
 
 #include <nc_core.h>
 #include <nc_server.h>
+#include <nc_event.h>
 
 struct msg *
 req_get(struct conn *conn)
 {
     struct msg *msg;
-
     ASSERT(conn->client && !conn->proxy);
-
+		
     msg = msg_get(conn, true, conn->redis);
     if (msg == NULL) {
+    		
         conn->err = errno;
     }
-
     return msg;
 }
 
@@ -37,7 +37,6 @@ void
 req_put(struct msg *msg)
 {
     struct msg *pmsg; /* peer message (response) */
-
     ASSERT(msg->request);
 
     pmsg = msg->peer;
@@ -353,13 +352,60 @@ req_recv_next(struct context *ctx, struct conn *conn, bool alloc)
     }
 
     msg = req_get(conn);
+
     if (msg != NULL) {
         conn->rmsg = msg;
     }
 
     return msg;
 }
+static struct mbuf *
+get_mbuf(struct msg *msg) 
+{
+    struct mbuf *mbuf;
 
+    mbuf = STAILQ_LAST(&msg->mhdr, mbuf, next);
+    if (mbuf == NULL || mbuf_full(mbuf)) {
+        mbuf = mbuf_get();
+        if (mbuf == NULL) {
+            return NULL;
+        }
+
+        mbuf_insert(&msg->mhdr, mbuf);
+        msg->pos = mbuf->pos;
+    }
+    ASSERT(mbuf->end - mbuf->last > 0);
+    return mbuf;
+}
+static void
+reply(struct context *ctx, struct conn *conn, struct msg *smsg, char *_msg) {
+    struct mbuf *mbuf;
+    int n;
+    
+    struct msg *msg = msg_get(conn, true, conn->redis);
+    if (msg == NULL) {
+        conn->err = errno;
+        return;
+    }
+
+    mbuf = get_mbuf(msg);
+    if (mbuf == NULL) {
+        msg_put(msg);
+        
+        return;
+    }
+		
+    smsg->peer = msg;
+    msg->peer = smsg;
+    msg->request = 0;
+    n = (int)strlen(_msg);
+    memcpy(mbuf->last, _msg, (size_t)n);
+    mbuf->last += n;
+    msg->mlen += (uint32_t)n;
+    smsg->done = 1;
+    event_add_out(ctx->ep, conn);
+    conn->enqueue_outq(ctx, conn, smsg);
+}
 static bool
 req_filter(struct context *ctx, struct conn *conn, struct msg *msg)
 {
@@ -386,7 +432,14 @@ req_filter(struct context *ctx, struct conn *conn, struct msg *msg)
         req_put(msg);
         return true;
     }
-
+		if (msg->type == MSG_REQ_REDIS_INFO) {     	
+        reply(ctx, conn, msg, "$30\r\n# Server\r\nredis_version:2.6.12\r\n");
+        return true;
+    }
+    if (msg->type == MSG_REQ_REDIS_PING) {     	
+        reply(ctx, conn, msg, "+PONG\r\n");
+        return true;
+    }
     return false;
 }
 
@@ -412,7 +465,7 @@ req_forward_error(struct context *ctx, struct conn *conn, struct msg *msg)
     }
 
     if (req_done(conn, TAILQ_FIRST(&conn->omsg_q))) {
-        status = event_add_out(ctx->evb, conn);
+        status = event_add_out(ctx->ep, conn);
         if (status != NC_OK) {
             conn->err = errno;
         }
@@ -481,7 +534,7 @@ req_forward(struct context *ctx, struct conn *c_conn, struct msg *msg)
 
     /* enqueue the message (request) into server inq */
     if (TAILQ_EMPTY(&s_conn->imsg_q)) {
-        status = event_add_out(ctx->evb, s_conn);
+        status = event_add_out(ctx->ep, s_conn);
         if (status != NC_OK) {
             req_forward_error(ctx, c_conn, msg);
             s_conn->err = errno;
@@ -532,7 +585,7 @@ req_send_next(struct context *ctx, struct conn *conn)
     nmsg = TAILQ_FIRST(&conn->imsg_q);
     if (nmsg == NULL) {
         /* nothing to send as the server inq is empty */
-        status = event_del_out(ctx->evb, conn);
+        status = event_del_out(ctx->ep, conn);
         if (status != NC_OK) {
             conn->err = errno;
         }

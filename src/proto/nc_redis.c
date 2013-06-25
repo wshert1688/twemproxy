@@ -57,7 +57,10 @@ redis_arg0(struct msg *r)
 
     case MSG_REQ_REDIS_ZCARD:
         return true;
-
+    case MSG_REQ_REDIS_INFO:
+        return true;
+    case MSG_REQ_REDIS_PING:
+        return true;
     default:
         break;
     }
@@ -84,6 +87,7 @@ redis_arg1(struct msg *r)
     case MSG_REQ_REDIS_GETSET:
     case MSG_REQ_REDIS_INCRBY:
     case MSG_REQ_REDIS_INCRBYFLOAT:
+    case MSG_REQ_REDIS_SET:
     case MSG_REQ_REDIS_SETNX:
 
     case MSG_REQ_REDIS_HEXISTS:
@@ -177,7 +181,6 @@ redis_argn(struct msg *r)
     switch (r->type) {
     case MSG_REQ_REDIS_BITCOUNT:
 
-    case MSG_REQ_REDIS_SET:
     case MSG_REQ_REDIS_HDEL:
     case MSG_REQ_REDIS_HMGET:
     case MSG_REQ_REDIS_HMSET:
@@ -555,7 +558,14 @@ redis_parse_req(struct msg *r)
                     r->type = MSG_REQ_REDIS_EVAL;
                     break;
                 }
-
+								if (str4icmp(m, 'i', 'n', 'f', 'o')) {
+                    r->type = MSG_REQ_REDIS_INFO;	
+                    break;
+                }
+                if (str4icmp(m, 'p', 'i', 'n', 'g')) {
+                    r->type = MSG_REQ_REDIS_PING;
+                    break;
+                }
                 break;
 
             case 5:
@@ -930,19 +940,23 @@ redis_parse_req(struct msg *r)
             break;
 
         case SW_REQ_TYPE_LF:
-            switch (ch) {
-            case LF:
-                if (redis_argeval(r)) {
-                    state = SW_ARG1_LEN;
-                } else {
-                    state = SW_KEY_LEN;
-                }
-                break;
-
-            default:
-                goto error;
+        		 if (r->type == MSG_REQ_REDIS_INFO||r->type == MSG_REQ_REDIS_PING) { 
+                goto done; 
             }
-
+            else {
+	            switch (ch) {
+	            case LF:
+	                if (redis_argeval(r)) {
+	                    state = SW_ARG1_LEN;
+	                } else {
+	                    state = SW_KEY_LEN;
+	                }
+	                break;
+	
+	            default:
+	                goto error;
+	            }
+						}
             break;
 
         case SW_KEY_LEN:
@@ -1538,7 +1552,6 @@ redis_parse_rsp(struct msg *r)
     struct mbuf *b;
     uint8_t *p, *m;
     uint8_t ch;
-
     enum {
         SW_START,
         SW_STATUS,
@@ -1676,7 +1689,6 @@ redis_parse_rsp(struct msg *r)
                 r->token = p;
                 r->rlen = 0;
             } else if (ch == '-') {
-                /* handles null bulk reply = '$-1' */
                 state = SW_RUNTO_CRLF;
             } else if (isdigit(ch)) {
                 r->rlen = r->rlen * 10 + (uint32_t)(ch - '0');
@@ -1744,15 +1756,12 @@ redis_parse_rsp(struct msg *r)
                 /* rsp_start <- p */
                 r->narg_start = p;
                 r->rnarg = 0;
-            } else if (ch == '-') {
-                state = SW_RUNTO_CRLF;
             } else if (isdigit(ch)) {
                 r->rnarg = r->rnarg * 10 + (uint32_t)(ch - '0');
             } else if (ch == CR) {
                 if ((p - r->token) <= 1) {
                     goto error;
                 }
-
                 r->narg = r->rnarg;
                 r->narg_end = p;
                 r->token = NULL;
@@ -1781,16 +1790,7 @@ redis_parse_rsp(struct msg *r)
 
         case SW_MULTIBULK_ARGN_LEN:
             if (r->token == NULL) {
-                /*
-                 * From: http://redis.io/topics/protocol, a multi bulk reply
-                 * is used to return an array of other replies. Every element
-                 * of a multi bulk reply can be of any kind, including a
-                 * nested multi bulk reply.
-                 *
-                 * Here, we only handle a multi bulk reply element that
-                 * are either integer reply or bulk reply.
-                 */
-                if (ch != '$' && ch != ':') {
+                if (ch != '$') {
                     goto error;
                 }
                 r->token = p;
@@ -1804,8 +1804,8 @@ redis_parse_rsp(struct msg *r)
                     goto error;
                 }
 
-                if ((r->rlen == 1 && (p - r->token) == 3) || *r->token == ':') {
-                    /* handles not-found reply = '$-1' or integer reply = ':<num>' */
+                if (r->rlen == 1 && (p - r->token) == 3) {
+                    /* handles not-found reply = '$-1'*/
                     r->rlen = 0;
                     state = SW_MULTIBULK_ARGN_LF;
                 } else {

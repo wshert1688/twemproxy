@@ -144,6 +144,8 @@ typedef enum msg_type {
     MSG_REQ_REDIS_ZREVRANGEBYSCORE,
     MSG_REQ_REDIS_ZREVRANK,
     MSG_REQ_REDIS_ZSCORE,
+    MSG_REQ_REDIS_INFO,
+    MSG_REQ_REDIS_PING,
     MSG_REQ_REDIS_ZUNIONSTORE,
     MSG_REQ_REDIS_EVAL,                   /* redis requests - eval */
     MSG_REQ_REDIS_EVALSHA,

@@ -52,9 +52,7 @@
 
 #include <nc_log.h>
 
-#ifndef __offsetof
 #define __offsetof(type, field) ((size_t)(&((type *)NULL)->field))
-#endif
 
 /*
  * This file defines five types of data structures: singly-linked lists,

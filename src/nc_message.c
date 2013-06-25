@@ -449,7 +449,7 @@ msg_parsed(struct context *ctx, struct conn *conn, struct msg *msg)
     msg->mlen -= nmsg->mlen;
 
     conn->recv_done(ctx, conn, msg, nmsg);
-
+		
     return NC_OK;
 }
 
@@ -567,7 +567,7 @@ static rstatus_t
 msg_parse(struct context *ctx, struct conn *conn, struct msg *msg)
 {
     rstatus_t status;
-
+	
     if (msg_empty(msg)) {
         /* no data to parse */
         conn->recv_done(ctx, conn, msg, NULL);
@@ -641,7 +641,7 @@ msg_recv_chain(struct context *ctx, struct conn *conn, struct msg *msg)
         if (status != NC_OK) {
             return status;
         }
-
+				
         /* get next message to parse */
         nmsg = conn->recv_next(ctx, conn, false);
         if (nmsg == NULL || nmsg == msg) {
@@ -671,6 +671,7 @@ msg_recv(struct context *ctx, struct conn *conn)
         }
 
         status = msg_recv_chain(ctx, conn, msg);
+        
         if (status != NC_OK) {
             return status;
         }
